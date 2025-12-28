@@ -1686,6 +1686,12 @@ class BvhQuery:
     _wp_native_name_ = "bvh_query_t"
 
 
+class BvhMpQuery:
+    """Object used to track state during BVH multipole traversal."""
+
+    _wp_native_name_ = "bvh_mp_query_t"
+
+
 class BvhQueryTiled:
     """Object used to track state during thread-block parallel BVH traversal."""
 
@@ -4452,6 +4458,91 @@ class Bvh:
             self.runtime.core.wp_bvh_refit_device(self.id)
             self.runtime.verify_cuda_device(self.device)
 
+    def update_multipoles(
+        self,
+        item_forces: array,
+        subtree_sizes: array,
+        centroids: array,
+        monopoles: array,
+        dipoles: array,
+    ):
+        """Update multipole moments for BVH nodes (CUDA only).
+
+        The ``item_forces`` array must have the same length as ``lowers``/``uppers``. The output arrays
+        must be sized for all BVH nodes (at least ``2 * len(lowers) - 1`` entries).
+        """
+        if self.device.is_cpu:
+            raise RuntimeError("BVH multipole updates are only supported on CUDA devices.")
+
+        num_items = len(self.lowers)
+
+        if item_forces.device != self.device:
+            raise RuntimeError(
+                "item_forces must live on the same device as the BVH, "
+                f"item_forces is on {item_forces.device} while the BVH is on {self.device}."
+            )
+        if item_forces.dtype != vec3 or not item_forces.is_contiguous:
+            raise RuntimeError("item_forces should be a contiguous array of type wp.vec3")
+        if len(item_forces) != num_items:
+            raise RuntimeError(
+                "item_forces must have the same length as the BVH lowers/uppers, "
+                f"item_forces length is {len(item_forces)} while the BVH length is {num_items}."
+            )
+
+        node_capacity = max(0, 2 * num_items - 1)
+
+        if subtree_sizes.device != self.device:
+            raise RuntimeError(
+                "subtree_sizes must live on the same device as the BVH, "
+                f"subtree_sizes is on {subtree_sizes.device} while the BVH is on {self.device}."
+            )
+        if subtree_sizes.dtype != int32 or not subtree_sizes.is_contiguous:
+            raise RuntimeError("subtree_sizes should be a contiguous array of type wp.int32")
+        if len(subtree_sizes) < node_capacity:
+            raise RuntimeError(
+                f"subtree_sizes must have at least {node_capacity} entries, got {len(subtree_sizes)}."
+            )
+
+        if centroids.device != self.device:
+            raise RuntimeError(
+                "centroids must live on the same device as the BVH, "
+                f"centroids is on {centroids.device} while the BVH is on {self.device}."
+            )
+        if centroids.dtype != vec3 or not centroids.is_contiguous:
+            raise RuntimeError("centroids should be a contiguous array of type wp.vec3")
+        if len(centroids) < node_capacity:
+            raise RuntimeError(f"centroids must have at least {node_capacity} entries, got {len(centroids)}.")
+
+        if monopoles.device != self.device:
+            raise RuntimeError(
+                "monopoles must live on the same device as the BVH, "
+                f"monopoles is on {monopoles.device} while the BVH is on {self.device}."
+            )
+        if monopoles.dtype != vec3 or not monopoles.is_contiguous:
+            raise RuntimeError("monopoles should be a contiguous array of type wp.vec3")
+        if len(monopoles) < node_capacity:
+            raise RuntimeError(f"monopoles must have at least {node_capacity} entries, got {len(monopoles)}.")
+
+        if dipoles.device != self.device:
+            raise RuntimeError(
+                "dipoles must live on the same device as the BVH, "
+                f"dipoles is on {dipoles.device} while the BVH is on {self.device}."
+            )
+        if dipoles.dtype != mat33 or not dipoles.is_contiguous:
+            raise RuntimeError("dipoles should be a contiguous array of type wp.mat33")
+        if len(dipoles) < node_capacity:
+            raise RuntimeError(f"dipoles must have at least {node_capacity} entries, got {len(dipoles)}.")
+
+        self.runtime.core.wp_bvh_update_multipoles_device(
+            self.id,
+            ctypes.c_void_p(item_forces.ptr),
+            ctypes.c_void_p(subtree_sizes.ptr),
+            ctypes.c_void_p(centroids.ptr),
+            ctypes.c_void_p(monopoles.ptr),
+            ctypes.c_void_p(dipoles.ptr),
+        )
+        self.runtime.verify_cuda_device(self.device)
+
     def rebuild(self, constructor: str | None = None):
         """Rebuild the BVH hierarchy **in place** from the current ``lowers``/``uppers`` arrays.
 
@@ -5988,6 +6079,7 @@ simple_type_codes = {
     MeshQueryPoint: "mqp",
     MeshQueryRay: "mqr",
     BvhQuery: "bvhq",
+    BvhMpQuery: "bmpq",
 }
 
 

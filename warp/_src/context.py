@@ -4110,6 +4110,14 @@ class Runtime:
             self.core.wp_bvh_rebuild_host.argtypes = [ctypes.c_uint64, ctypes.c_int]
             self.core.wp_bvh_refit_device.argtypes = [ctypes.c_uint64]
             self.core.wp_bvh_rebuild_device.argtypes = [ctypes.c_uint64]
+            self.core.wp_bvh_update_multipoles_device.argtypes = [
+                ctypes.c_uint64,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
 
             self.core.wp_mesh_create_host.restype = ctypes.c_uint64
             self.core.wp_mesh_create_host.argtypes = [
@@ -8399,6 +8407,7 @@ def export_functions_rst(file):  # pragma: no cover
 
     query_types = (
         ("bvh_query", "BvhQuery"),
+        ("bvh_mp_query", "BvhMpQuery"),
         ("mesh_query_aabb", "MeshQueryAABB"),
         ("mesh_query_point", "MeshQueryPoint"),
         ("mesh_query_ray", "MeshQueryRay"),

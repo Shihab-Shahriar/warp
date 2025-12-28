@@ -157,6 +157,158 @@ __global__ void bvh_refit_kernel(
     }
 }
 
+CUDA_CALLABLE inline void compute_multipoles_leaf(
+    int index,
+    const int* __restrict__ primitive_indices,
+    const BVHPackedNodeHalf* __restrict__ node_lowers,
+    const BVHPackedNodeHalf* __restrict__ node_uppers,
+    // user controls all 5 buffers below
+    const vec3* __restrict__ item_lowers,
+    const vec3* __restrict__ item_forces,
+    // output buffers
+    int* __restrict__ subtree_sizes,
+    vec3* __restrict__ centroids, 
+    vec3* __restrict__ monopoles,      // 2*n-1: for both leaf and internal nodes
+    mat33* __restrict__ dipoles        // 2*n-1: for both leaf and internal nodes
+)
+{
+        const BVHPackedNodeHalf& lower = node_lowers[index];
+        const BVHPackedNodeHalf& upper = node_uppers[index];
+
+        const int start = lower.i;
+        const int end = upper.i;
+
+        vec3 force = vec3(0.0f);
+        mat33 dipole = mat33(0.0);
+        vec3 centroid = vec3(0.0f);
+
+        for (int primitive_counter = start; primitive_counter < end; primitive_counter++) {
+            const int primitive = primitive_indices[primitive_counter];
+            vec3 lower = item_lowers[primitive];
+            
+            force += item_forces[primitive];
+            centroid += lower;
+        }
+        centroid = centroid * (1.0f / float(end - start));
+
+        centroids[index] = centroid;
+        monopoles[index] = force;
+        subtree_sizes[index] = (end - start);
+
+        // compute dipole (TODO: merge with above loop)
+        for (int primitive_counter = start; primitive_counter < end; primitive_counter++) {
+            const int primitive = primitive_indices[primitive_counter];
+
+            vec3 lower = item_lowers[primitive];
+            vec3 r = lower - centroid;
+            dipole += outer(r, item_forces[primitive]);
+        }
+
+        dipoles[index] = dipole;
+}
+
+__global__ void bvh_update_multipoles(
+    int n, 
+    const int* __restrict__ parents,
+    int* __restrict__ child_count,
+    const int* __restrict__ primitive_indices,
+    BVHPackedNodeHalf* __restrict__ node_lowers,
+    BVHPackedNodeHalf* __restrict__ node_uppers,
+    // user controls all 5 buffers below
+    const vec3* __restrict__ item_lowers,
+    const vec3* __restrict__ item_uppers,
+    const vec3* __restrict__ item_forces,
+    // output buffers
+    int* __restrict__ subtree_sizes,
+    vec3* __restrict__ centroids,      // 2*n-1: for both leaf and internal nodes
+    vec3* __restrict__ monopoles,      // 2*n-1: for both leaf and internal nodes
+    mat33* __restrict__ dipoles     // 2*n-1: for both leaf and internal nodes
+)
+{
+    int index = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (index >= n)  // n=bvh.num_leaf_nodes
+        return;
+
+    bool leaf = node_lowers[index].b;
+    int parent = parents[index];
+
+    if (leaf) {
+        // compute leaf multipole
+        compute_multipoles_leaf(
+            index, primitive_indices, node_lowers, node_uppers,
+            item_lowers, item_forces,
+            subtree_sizes, centroids, monopoles, dipoles
+        );
+
+    } else {
+        // only keep leaf threads
+        return;
+    }
+
+    // update hierarchy
+    for (;;) {
+        parent = parents[index];
+        // reached root
+        if (parent == -1)
+            return;
+
+        // ensure all writes are visible
+        __threadfence();
+
+        int finished = atomicAdd(&child_count[parent], 1);
+
+        // if we have are the last thread (such that the parent node is now complete)
+        // then update its bounds and move onto the next parent in the hierarchy
+        if (finished == 1) {
+            BVHPackedNodeHalf& parent_lower = node_lowers[parent];
+            BVHPackedNodeHalf& parent_upper = node_uppers[parent];
+            if (parent_lower.b)
+            {
+                // update the leaf node
+                int parent_parent = parents[parent];
+
+                // parent is a packed leaf node but grandparent is not
+                if (!node_lowers[parent_parent].b) { //what if parent was root?
+                    // compute leaf multipole
+                    compute_multipoles_leaf(
+                        parent, primitive_indices, node_lowers, node_uppers,
+                        item_lowers, item_forces,
+                        subtree_sizes,centroids,monopoles, dipoles
+                    );
+                }
+            } else { // merge two nodes' moments
+                const int left_child = parent_lower.i;
+                const int right_child = parent_upper.i;
+                int nL = subtree_sizes[left_child];
+                int nR = subtree_sizes[right_child];
+                int nP = nL + nR;
+                
+                vec3 centroid = (centroids[left_child] * float(nL) + centroids[right_child] * float(nR)) / float(nP);
+                vec3 monopole = monopoles[left_child] + monopoles[right_child];
+
+                mat33 dipole = dipoles[left_child] + dipoles[right_child];
+
+                dipole += outer(centroids[left_child] - centroid, monopoles[left_child]);
+                dipole += outer(centroids[right_child] - centroid, monopoles[right_child]);
+
+                centroids[parent] = centroid;
+                monopoles[parent] = monopole;
+                dipoles[parent] = dipole;
+                subtree_sizes[parent] = nP;
+
+            }
+            // move onto processing the parent
+            index = parent;
+        } else {
+            // parent not ready (we are the first child), terminate thread
+            break;
+        }
+    }
+}
+
+
+
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 // Create a linear BVH as described in Fast and Simple Agglomerative LBVH construction
@@ -530,6 +682,9 @@ void LinearBVHBuilderGPU::build(
     BVH& bvh, const vec3* item_lowers, const vec3* item_uppers, int num_items, bounds3* total_bounds, int* item_groups
 )
 {
+    // put a printf here to indicate GPU LBVH building
+    printf("SSK: Building LBVH on GPU for %d items...\n", num_items);
+
     // allocate temporary memory used during  building
     indices = (int*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(int) * num_items * 2);  // *2 for radix sort
     keys = (uint64_t*)wp_alloc_device(WP_CURRENT_CONTEXT, sizeof(uint64_t) * num_items * 2);  // *2 for radix sort
@@ -776,6 +931,26 @@ void bvh_refit_device(BVH& bvh)
     );
 }
 
+void bvh_update_multipoles_device(
+    BVH& bvh,
+    const vec3* item_forces,
+    int* subtree_sizes,
+    vec3* centroids,
+    vec3* monopoles,
+    mat33* dipoles
+)
+{
+    ContextGuard guard(bvh.context);
+
+    // clear child counters
+    wp_memset_device(WP_CURRENT_CONTEXT, bvh.node_counts, 0, sizeof(int) * bvh.max_nodes);
+    wp_launch_device(
+        WP_CURRENT_CONTEXT, bvh_update_multipoles, bvh.num_leaf_nodes,
+        (bvh.num_leaf_nodes, bvh.node_parents, bvh.node_counts, bvh.primitive_indices, bvh.node_lowers, bvh.node_uppers,
+         bvh.item_lowers, bvh.item_uppers, item_forces, subtree_sizes, centroids, monopoles, dipoles)
+    );
+}
+
 void bvh_rebuild_device(BVH& bvh)
 {
     ContextGuard guard(bvh.context);
@@ -795,6 +970,23 @@ void wp_bvh_refit_device(uint64_t id)
         ContextGuard guard(bvh.context);
 
         wp::bvh_refit_device(bvh);
+    }
+}
+
+void wp_bvh_update_multipoles_device(
+    uint64_t id,
+    wp::vec3* item_forces,
+    int* subtree_sizes,
+    wp::vec3* centroids,
+    wp::vec3* monopoles,
+    wp::mat33* dipoles
+)
+{
+    wp::BVH bvh;
+    if (bvh_get_descriptor(id, bvh)) {
+        ContextGuard guard(bvh.context);
+
+        wp::bvh_update_multipoles_device(bvh, item_forces, subtree_sizes, centroids, monopoles, dipoles);
     }
 }
 

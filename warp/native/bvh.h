@@ -268,6 +268,14 @@ CUDA_CALLABLE inline int bvh_get_num_bounds(uint64_t id)
     return bvh.num_items;
 }
 
+CUDA_CALLABLE inline int bvh_primitive_id(uint64_t id, int& index)
+{
+    BVH bvh = bvh_get(id);
+    if (bvh.primitive_indices == nullptr)
+        return -1;
+    return bvh.primitive_indices[index];
+}
+
 CUDA_CALLABLE inline int get_leaf_group(const BVH& bvh, int leaf)
 {
     if (!bvh.item_groups)
@@ -390,6 +398,92 @@ struct bvh_query_t {
     bool is_ray;
 };
 
+
+struct bvh_mp_query_t {
+    CUDA_CALLABLE bvh_mp_query_t()
+        : bvh()
+        , stack()
+        , count(0)
+        , qpoint()
+        , bounds_nr(0)
+        , primitive_counter(-1)
+        , angle_criterion(0.0f)
+        , treenode(false)
+    {
+    }
+
+
+    BVH bvh;
+
+    // BVH traversal stack:
+#if BVH_SHARED_STACK
+    bvh_stack_t stack;
+#else
+    int stack[BVH_QUERY_STACK_SIZE];
+#endif
+
+    int count;
+
+    // >= 0 if currently in a packed leaf node
+    int primitive_counter;
+
+    // inputs
+    wp::vec3 qpoint;
+
+    int bounds_nr;
+
+    float angle_criterion;
+    bool treenode; // true if current is either internal or leaf node, false if current is primitive
+};
+
+CUDA_CALLABLE inline bvh_mp_query_t bvh_mp_query(uint64_t id, const vec3& point, 
+                                                float angle_criterion)
+{
+    // This routine traverses the BVH tree until it finds
+    // the first overlapping bound.
+
+    // initialize empty
+    bvh_mp_query_t query;
+
+#if BVH_SHARED_STACK
+    __shared__ int stack[BVH_QUERY_STACK_SIZE * WP_TILE_BLOCK_DIM];
+    query.stack.ptr = &stack[threadIdx.x];
+#endif
+
+    query.bounds_nr = -1;
+
+    BVH bvh = bvh_get(id);
+
+    query.bvh = bvh;
+
+    // optimization: make the latest
+    query.stack[0] = *bvh.root;
+    query.count = 1;
+    // ensure node-level AABB tests run on first iteration
+    query.primitive_counter = 0;
+    query.qpoint = point;
+    query.angle_criterion = angle_criterion;
+    return query;
+}
+
+CUDA_CALLABLE inline bvh_mp_query_t bvh_mp_query_w_tid(uint64_t id, int tid, 
+                                                float angle_criterion)
+{
+    /**
+     * @brief When target particles fully overlap with the source particles,
+     * we can reuse morton code ordering to ensure warps operate on 
+     * particles close in world space (not in memory locations). Otherwise,
+     * we'd have serious divergence in tree traversal, both in terms of 
+     * instruction and memory access.
+     */
+    BVH bvh = bvh_get(id);
+    int prim_id = bvh.primitive_indices[tid];
+    vec3 point = bvh.item_lowers[prim_id]; 
+    return bvh_mp_query(id, point, angle_criterion);
+}
+
+
+
 CUDA_CALLABLE inline bool
 bvh_query_intersection_test(const bvh_query_t& query, const vec3& node_lower, const vec3& node_upper, float& t)
 {
@@ -454,6 +548,8 @@ CUDA_CALLABLE inline void
 adj_bvh_query_ray(uint64_t id, const vec3& start, const vec3& dir, int root, uint64_t, vec3&, vec3&, int&, bvh_query_t&)
 {
 }
+
+CUDA_CALLABLE inline void adj_bvh_primitive_id(uint64_t id, int& index, uint64_t&, int&, int&) { }
 
 CUDA_CALLABLE inline void adj_bvh_get_group_root(uint64_t id, int group_id, uint64_t&, int&, int&) { }
 
@@ -524,6 +620,116 @@ CUDA_CALLABLE inline bool bvh_query_next(bvh_query_t& query, int& index, const f
     }
     return false;
 }
+
+
+CUDA_CALLABLE inline bool test_acceptance_criterion(
+    const vec3& node_lower,
+    const vec3& node_upper,
+    const vec3& qpoint,
+    float angle_criterion_sq
+)
+{
+    // TODO: take depth into account for better accuracy
+    auto diag = node_upper - node_lower;
+    //float s = length_sq(); // can't be zero for any tree node, leaf or internal
+
+    float s = max(diag[0], max(diag[1], diag[2]));
+    
+    vec3 closest = closest_point_to_aabb(qpoint, node_lower, node_upper);
+    float closest_dist_sq = length_sq(closest - qpoint);
+    if(closest_dist_sq <36.0)
+        return false;
+
+    vec3 center = 0.5f * (node_lower + node_upper);
+    float d = length_sq(center - qpoint) - 1.0; // subtract radius
+    
+    return (s*s) < (angle_criterion_sq * d);
+}
+
+CUDA_CALLABLE inline bool multipole_query_next(bvh_mp_query_t& query)
+{
+    /**
+     * @brief Returns all tree nodes (internal and leaf) that is *outside* the angle criterion
+     * 
+     * If a leaf node falls within, we return all the primitives inside the leaf one by one.
+     * 
+     * WARNING: If target is same as source, it's caller's job to filter out self-interactions.
+     * 
+     */
+    BVH bvh = query.bvh;
+    float angle_criterion_sq = query.angle_criterion * query.angle_criterion;
+
+    while (query.count) {
+        const int node_index = query.stack[--query.count];
+
+        BVHPackedNodeHalf node_lower = bvh_load_node(bvh.node_lowers, node_index);
+        BVHPackedNodeHalf node_upper = bvh_load_node(bvh.node_uppers, node_index);
+
+        bool accept = false;
+        // if we're in the midst of visiting primitives in a leaf node, skip the acceptance test
+        if (query.primitive_counter == 0)
+        {
+            vec3 lower_point = (vec3&)(node_lower);
+            vec3 upper_point = (vec3&)(node_upper);
+
+            accept = test_acceptance_criterion(
+                lower_point,
+                upper_point,
+                query.qpoint,
+                angle_criterion_sq
+            );
+
+            if(accept) // node far away, terminate search for this subtree
+            {
+                query.bounds_nr = node_index;
+                query.treenode = true;
+                return true;
+            }
+        }
+
+        const int left_index = node_lower.i;
+        const int right_index = node_upper.i;
+
+        if (node_lower.b) {
+            const int start = left_index;
+            const int end = right_index;
+
+            int primitive_index = bvh.primitive_indices[start + (query.primitive_counter++)];
+
+            // if already visited the last primitive in the leaf node
+            // move to the next node and reset the primitive counter to 0
+            if (start + query.primitive_counter == end) {
+                query.primitive_counter = 0;
+            }
+            // otherwise we need to keep this leaf node in stack for a future visit
+            else {
+                query.stack[query.count++] = node_index;
+            }
+
+            query.bounds_nr = primitive_index;
+            query.treenode = false;
+            return true;
+            
+        } else {
+            // else traverse down the tree
+            query.primitive_counter = 0;
+            query.stack[query.count++] = left_index;
+            query.stack[query.count++] = right_index;
+        }
+    }
+    return false;
+}
+
+CUDA_CALLABLE inline bool multipole_query_next(bvh_mp_query_t& query, int& index, bool& treenode)
+{
+    const bool hit = multipole_query_next(query);
+    if (hit) {
+        index = query.bounds_nr;
+        treenode = query.treenode;
+    }
+    return hit;
+}
+
 
 
 CUDA_CALLABLE inline int iter_next(bvh_query_t& query) { return query.bounds_nr; }

@@ -5948,6 +5948,57 @@ add_builtin(
     is_differentiable=False,
 )
 
+add_builtin(
+    "bvh_mp_query",
+    input_types={"id": uint64, "point": vec3, "angle_criterion": float},
+    value_type=BvhMpQuery,
+    group="Geometry",
+    doc="""Construct a multipole BVH query against a point.
+
+    This query can be used to iterate over BVH nodes that satisfy an acceptance criterion, or individual
+    primitives when the node is too close to the query point.
+
+    :param id: The BVH identifier
+    :param point: The query point in BVH space
+    :param angle_criterion: The multipole acceptance criterion (theta)""",
+    export=False,
+    is_differentiable=False,
+)
+
+add_builtin(
+    "bvh_mp_query_w_tid",
+    input_types={"id": uint64, "tid": int, "angle_criterion": float},
+    value_type=BvhMpQuery,
+    group="Geometry",
+    doc="""Construct a multipole BVH query using a primitive index as the query point.
+
+    This uses the BVH's primitive ordering to map ``tid`` to a point via ``item_lowers``.
+
+    :param id: The BVH identifier
+    :param tid: The primitive index (usually ``wp.tid()``)
+    :param angle_criterion: The multipole acceptance criterion (theta)""",
+    export=False,
+    is_differentiable=False,
+)
+
+add_builtin(
+    "multipole_query_next",
+    input_types={"query": BvhMpQuery, "index": int, "is_node": builtins.bool},
+    value_type=builtins.bool,
+    group="Geometry",
+    doc="""Move to the next node or primitive returned by a multipole BVH query.
+
+    When this returns ``True``, ``index`` contains either a BVH node index (when ``is_node`` is ``True``)
+    or a primitive index (when ``is_node`` is ``False``). If the query point is part of the same BVH, the
+    caller must filter out self-interactions.
+
+    :param query: The multipole query to advance
+    :param index: The output node/primitive index
+    :param is_node: True if ``index`` refers to a BVH node, false if it refers to a primitive""",
+    export=False,
+    is_differentiable=False,
+)
+
 # Primary naming convention (grouped with other geometry functions)
 add_builtin(
     "bvh_query_aabb_tiled",
@@ -6086,6 +6137,20 @@ add_builtin(
     is_differentiable=False,
 )
 
+
+add_builtin(
+    "bvh_primitive_id",
+    input_types={"id": uint64, "index": int},
+    value_type=int,
+    group="Geometry",
+    doc="""Return the primitive index for a BVH's internal ordering.
+
+    This can be used to map thread indices to spatially nearby primitives.
+
+    Returns -1 if the BVH has no primitive indices.""",
+    export=False,
+    is_differentiable=False,
+)
 
 add_builtin(
     "bvh_get_group_root",

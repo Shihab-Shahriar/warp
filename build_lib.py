@@ -265,6 +265,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--msvc_path", type=str, help="Path to MSVC compiler (optional if already on PATH)")
     parser.add_argument("--sdk_path", type=str, help="Path to WinSDK (optional if already on PATH)")
     parser.add_argument("--cuda_path", type=str, help="Path to CUDA SDK")
+    parser.add_argument(
+        "--cuda_archs",
+        type=str,
+        default="90",
+        help="Comma-separated list of CUDA SM architectures to build (e.g. '89' or 'sm_89'). Overrides default gencode list.",
+    )
     parser.add_argument("--libmathdx_path", type=str, help="Path to libmathdx (optional if LIBMATHDX_HOME is defined)")
     parser.add_argument(
         "--mode",
@@ -301,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--quick", action="store_true", help="Only generate PTX code")
     parser.set_defaults(quick=False)
 
-    parser.add_argument("-j", "--jobs", type=int, default=4, help="Number of concurrent build tasks.")
+    parser.add_argument("-j", "--jobs", type=int, default=2, help="Number of concurrent build tasks.")
 
     group_clang_llvm = parser.add_argument_group("Clang/LLVM Options")
     group_clang_llvm.add_argument("--llvm_path", type=str, help="Path to an existing LLVM installation")

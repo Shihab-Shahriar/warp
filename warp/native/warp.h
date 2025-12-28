@@ -91,6 +91,14 @@ WP_API uint64_t wp_bvh_create_device(
 WP_API void wp_bvh_destroy_device(uint64_t id);
 WP_API void wp_bvh_refit_device(uint64_t id);
 WP_API void wp_bvh_rebuild_device(uint64_t id);
+WP_API void wp_bvh_update_multipoles_device(
+    uint64_t id,
+    wp::vec3* item_forces,
+    int* subtree_sizes,
+    wp::vec3* centroids,
+    wp::vec3* monopoles,
+    wp::mat33* dipoles
+);
 
 // create a user-accessible copy of the mesh, it is the
 // users responsibility to keep-alive the points/tris data for the duration of the mesh lifetime

@@ -277,6 +277,44 @@ def add_llvm_bin_to_path(args):
     return True
 
 
+def _parse_cuda_archs(raw_archs: str | None) -> list[int]:
+    if not raw_archs:
+        return []
+
+    archs = []
+    for token in raw_archs.replace(";", ",").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        normalized = token.lower()
+        if normalized.startswith("sm_"):
+            normalized = normalized[3:]
+        elif normalized.startswith("compute_"):
+            normalized = normalized[8:]
+        normalized = normalized.replace(".", "")
+        if not normalized.isdigit():
+            raise ValueError(f"Invalid CUDA architecture '{token}' (expected like '89' or 'sm_89')")
+        arch = int(normalized)
+        if arch not in archs:
+            archs.append(arch)
+
+    return archs
+
+
+def _get_custom_architectures(archs: list[int], quick_build: bool = False) -> tuple[list[str], list[str]]:
+    gencode_opts = []
+    clang_arch_flags = []
+
+    for arch in archs:
+        if quick_build:
+            gencode_opts.append(f"-gencode=arch=compute_{arch},code=compute_{arch}")
+        else:
+            gencode_opts.append(f"-gencode=arch=compute_{arch},code=sm_{arch}")
+        clang_arch_flags.append(f"--cuda-gpu-arch=sm_{arch}")
+
+    return gencode_opts, clang_arch_flags
+
+
 def _get_architectures_cu12(
     ctk_version: tuple[int, int], arch: str, target_platform: str, quick_build: bool = False
 ) -> tuple[list[str], list[str]]:
@@ -468,11 +506,18 @@ def build_dll_for_arch(args, dll_path, cpp_paths, cu_paths, arch, libs: list[str
                 f"CUDA Toolkit version {MIN_CTK_VERSION[0]}.{MIN_CTK_VERSION[1]}+ is required (found {ctk_version[0]}.{ctk_version[1]} in {cuda_home})"
             )
 
-        # Get architecture flags based on CUDA version
-        if ctk_version >= (13, 0):
-            gencode_opts, clang_arch_flags = _get_architectures_cu13(ctk_version, arch, sys.platform, args.quick)
+        custom_archs = _parse_cuda_archs(getattr(args, "cuda_archs", None))
+        if custom_archs:
+            if args.verbose:
+                arch_list = ", ".join(str(arch) for arch in custom_archs)
+                print(f"Using custom CUDA architectures: {arch_list}")
+            gencode_opts, clang_arch_flags = _get_custom_architectures(custom_archs, args.quick)
         else:
-            gencode_opts, clang_arch_flags = _get_architectures_cu12(ctk_version, arch, sys.platform, args.quick)
+            # Get architecture flags based on CUDA version
+            if ctk_version >= (13, 0):
+                gencode_opts, clang_arch_flags = _get_architectures_cu13(ctk_version, arch, sys.platform, args.quick)
+            else:
+                gencode_opts, clang_arch_flags = _get_architectures_cu12(ctk_version, arch, sys.platform, args.quick)
 
         nvcc_opts = [
             *gencode_opts,

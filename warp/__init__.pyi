@@ -151,6 +151,7 @@ from warp._src.types import Mesh as Mesh
 from warp._src.types import HashGrid as HashGrid
 from warp._src.types import Volume as Volume
 from warp._src.types import BvhQuery as BvhQuery
+from warp._src.types import BvhMpQuery as BvhMpQuery
 from warp._src.types import BvhQueryTiled as BvhQueryTiled
 from warp._src.types import HashGridQuery as HashGridQuery
 from warp._src.types import MeshQueryAABB as MeshQueryAABB
@@ -3743,6 +3744,45 @@ def bvh_query_next(query: BvhQuery, index: int32, max_dist: float32) -> bool:
     ...
 
 @over
+def bvh_mp_query(id: uint64, point: vec3f, angle_criterion: float32) -> BvhMpQuery:
+    """Construct a multipole BVH query against a point.
+
+    This query can be used to iterate over BVH nodes that satisfy an acceptance criterion, or individual
+    primitives when the node is too close to the query point.
+
+    :param id: The BVH identifier
+    :param point: The query point in BVH space
+    :param angle_criterion: The multipole acceptance criterion (theta)
+    """
+    ...
+
+@over
+def bvh_mp_query_w_tid(id: uint64, tid: int32, angle_criterion: float32) -> BvhMpQuery:
+    """Construct a multipole BVH query using a primitive index as the query point.
+
+    This uses the BVH's primitive ordering to map ``tid`` to a point via ``item_lowers``.
+
+    :param id: The BVH identifier
+    :param tid: The primitive index (usually ``wp.tid()``)
+    :param angle_criterion: The multipole acceptance criterion (theta)
+    """
+    ...
+
+@over
+def multipole_query_next(query: BvhMpQuery, index: int32, is_node: bool) -> bool:
+    """Move to the next node or primitive returned by a multipole BVH query.
+
+    When this returns ``True``, ``index`` contains either a BVH node index (when ``is_node`` is ``True``)
+    or a primitive index (when ``is_node`` is ``False``). If the query point is part of the same BVH, the
+    caller must filter out self-interactions.
+
+    :param query: The multipole query to advance
+    :param index: The output node/primitive index
+    :param is_node: True if ``index`` refers to a BVH node, false if it refers to a primitive
+    """
+    ...
+
+@over
 def bvh_query_aabb_tiled(id: uint64, low: vec3f, high: vec3f) -> BvhQueryTiled:
     """Construct an axis-aligned bounding box query against a BVH object for thread-block parallel traversal.
 
@@ -3823,6 +3863,16 @@ def tile_bvh_query_next(query: BvhQueryTiled) -> Tile[int32, tuple[int]]:
               the result index for that thread (-1 if no result)
 
     .. note:: This is an alias for :func:`bvh_query_next_tiled`.
+    """
+    ...
+
+@over
+def bvh_primitive_id(id: uint64, index: int32) -> int:
+    """Return the primitive index for a BVH's internal ordering.
+
+    This can be used to map thread indices to spatially nearby primitives.
+
+    Returns -1 if the BVH has no primitive indices.
     """
     ...
 
